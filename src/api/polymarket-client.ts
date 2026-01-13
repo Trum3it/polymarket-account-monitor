@@ -15,6 +15,7 @@ import {
 export class PolymarketClient {
   private client: AxiosInstance;
   private config: PolymarketConfig;
+  private marketCache: Map<string, Market> = new Map();
 
   constructor(config: PolymarketConfig = {}) {
     this.config = {
@@ -75,7 +76,8 @@ export class PolymarketClient {
         }
       }
       
-      const normalizedPositions = this.normalizePositions(Array.isArray(positions) ? positions : []);
+      const positionsArray = Array.isArray(positions) ? positions : [];
+      const normalizedPositions = this.normalizePositions(positionsArray);
       
       return {
         user: userAddress,
@@ -113,7 +115,30 @@ export class PolymarketClient {
             sort: 'desc',
           },
         });
+        
+        // Log response structure for debugging
+        if (process.env.DEBUG) {
+          console.log('API Response structure:', {
+            hasData: !!response.data,
+            dataKeys: response.data ? Object.keys(response.data) : [],
+            isArray: Array.isArray(response.data),
+          });
+        }
+        
         trades = response.data.trades || response.data?.data || response.data || [];
+        
+        // Log first trade item structure for debugging
+        if (process.env.DEBUG && Array.isArray(trades) && trades.length > 0) {
+          console.log('\n=== First Trade Item Structure ===');
+          console.log(JSON.stringify(trades[0], null, 2));
+          console.log('===================================\n');
+        }
+        
+        // Ensure it's an array
+        if (!Array.isArray(trades)) {
+          console.warn('API returned non-array trades data, converting...');
+          trades = [];
+        }
       } catch (primaryError: any) {
         // Try alternative endpoint format
         try {
@@ -124,7 +149,12 @@ export class PolymarketClient {
               sort: 'desc',
             },
           });
+          
           trades = altResponse.data.trades || altResponse.data?.data || altResponse.data || [];
+          
+          if (!Array.isArray(trades)) {
+            trades = [];
+          }
         } catch (altError: any) {
           // If both fail, check if it's a 404 (no trades) or actual error
           if (primaryError.response?.status === 404 || altError.response?.status === 404) {
@@ -139,7 +169,9 @@ export class PolymarketClient {
         }
       }
 
-      const normalizedTrades = this.normalizeTrades(Array.isArray(trades) ? trades : []);
+      // Ensure trades is an array and log for debugging
+      const tradesArray = Array.isArray(trades) ? trades : [];
+      const normalizedTrades = this.normalizeTrades(tradesArray);
 
       return {
         user: userAddress,
@@ -148,6 +180,11 @@ export class PolymarketClient {
         timestamp: new Date().toISOString(),
       };
     } catch (error: any) {
+      // Log the actual error for debugging
+      if (process.env.DEBUG) {
+        console.error('Error fetching trades:', error.response?.data || error.message);
+      }
+      
       if (error.response?.status === 404) {
         return {
           user: userAddress,
@@ -156,6 +193,18 @@ export class PolymarketClient {
           timestamp: new Date().toISOString(),
         };
       }
+      
+      // If it's a normalization error, return empty trades instead of throwing
+      if (error.message?.includes('Cannot read properties')) {
+        console.warn('Warning: Error normalizing trade data, returning empty trades');
+        return {
+          user: userAddress,
+          trades: [],
+          totalTrades: 0,
+          timestamp: new Date().toISOString(),
+        };
+      }
+      
       throw new Error(`Failed to fetch user trades: ${error.message}`);
     }
   }
@@ -164,11 +213,82 @@ export class PolymarketClient {
    * Get market information by market ID
    */
   async getMarket(marketId: string): Promise<Market> {
+    if (!marketId) {
+      return this.normalizeMarket({});
+    }
+
+    // Check cache first
+    if (this.marketCache.has(marketId)) {
+      return this.marketCache.get(marketId)!;
+    }
+
     try {
-      const response = await this.client.get(`/markets/${marketId}`);
-      return this.normalizeMarket(response.data);
+      // Try multiple possible endpoints
+      let marketData: any = null;
+      
+      try {
+        // Try Gamma API first (usually has better market data)
+        const gammaClient = axios.create({
+          baseURL: this.config.gammaApiUrl,
+          timeout: 30000,
+        });
+        
+        // Try different Gamma API endpoint formats
+        try {
+          const gammaResponse = await gammaClient.get(`/markets/${marketId}`);
+          marketData = gammaResponse.data;
+        } catch (e1: any) {
+          try {
+            // Try with condition ID format
+            const gammaResponse2 = await gammaClient.get(`/events`, {
+              params: { conditionId: marketId },
+            });
+            if (gammaResponse2.data && gammaResponse2.data.length > 0) {
+              marketData = gammaResponse2.data[0];
+            }
+          } catch (e2: any) {
+            // Try markets endpoint
+            const gammaResponse3 = await gammaClient.get(`/markets`, {
+              params: { id: marketId },
+            });
+            if (gammaResponse3.data && Array.isArray(gammaResponse3.data) && gammaResponse3.data.length > 0) {
+              marketData = gammaResponse3.data[0];
+            } else if (gammaResponse3.data && !Array.isArray(gammaResponse3.data)) {
+              marketData = gammaResponse3.data;
+            }
+          }
+        }
+      } catch (gammaError: any) {
+        // Try Data API
+        try {
+          const response = await this.client.get(`/markets/${marketId}`);
+          marketData = response.data;
+        } catch (dataApiError: any) {
+          // Try CLOB API
+          try {
+            const clobClient = axios.create({
+              baseURL: this.config.clobApiUrl,
+              timeout: 30000,
+            });
+            const clobResponse = await clobClient.get(`/markets/${marketId}`);
+            marketData = clobResponse.data;
+          } catch (clobError: any) {
+            // If all fail, return default market with ID
+            const defaultMarket = this.normalizeMarket({ id: marketId, marketId: marketId });
+            this.marketCache.set(marketId, defaultMarket);
+            return defaultMarket;
+          }
+        }
+      }
+      
+      const normalizedMarket = this.normalizeMarket(marketData || { id: marketId });
+      this.marketCache.set(marketId, normalizedMarket);
+      return normalizedMarket;
     } catch (error: any) {
-      throw new Error(`Failed to fetch market: ${error.message}`);
+      // Return market with at least the ID
+      const defaultMarket = this.normalizeMarket({ id: marketId, marketId: marketId });
+      this.marketCache.set(marketId, defaultMarket);
+      return defaultMarket;
     }
   }
 
@@ -186,54 +306,206 @@ export class PolymarketClient {
   }
 
   /**
+   * Enrich trades with market data by fetching market details
+   */
+  private async enrichWithMarketData(trades: Trade[]): Promise<Trade[]> {
+    // Extract unique market IDs
+    const marketIds = new Set<string>();
+    trades.forEach(trade => {
+      if (trade.market.id) {
+        marketIds.add(trade.market.id);
+      }
+    });
+
+    // Fetch market data for all unique IDs (with caching)
+    const marketPromises = Array.from(marketIds).map(async (marketId) => {
+      if (this.marketCache.has(marketId)) {
+        return this.marketCache.get(marketId)!;
+      }
+      try {
+        const market = await this.getMarket(marketId);
+        this.marketCache.set(marketId, market);
+        return market;
+      } catch (error) {
+        // Return cached or default market
+        return this.marketCache.get(marketId) || this.normalizeMarket({ id: marketId });
+      }
+    });
+
+    const markets = await Promise.all(marketPromises);
+    const marketMap = new Map<string, Market>();
+    markets.forEach(market => {
+      if (market.id) {
+        marketMap.set(market.id, market);
+      }
+    });
+
+    // Update trades with enriched market data
+    return trades.map(trade => {
+      if (trade.market.id && marketMap.has(trade.market.id)) {
+        return {
+          ...trade,
+          market: marketMap.get(trade.market.id)!,
+        };
+      }
+      return trade;
+    });
+  }
+
+  /**
+   * Enrich positions with market data by fetching market details
+   */
+  private async enrichPositionsWithMarketData(positions: Position[]): Promise<Position[]> {
+    // Extract unique market IDs
+    const marketIds = new Set<string>();
+    positions.forEach(position => {
+      if (position.market.id) {
+        marketIds.add(position.market.id);
+      }
+    });
+
+    // Fetch market data for all unique IDs (with caching)
+    const marketPromises = Array.from(marketIds).map(async (marketId) => {
+      if (this.marketCache.has(marketId)) {
+        return this.marketCache.get(marketId)!;
+      }
+      try {
+        const market = await this.getMarket(marketId);
+        this.marketCache.set(marketId, market);
+        return market;
+      } catch (error) {
+        // Return cached or default market
+        return this.marketCache.get(marketId) || this.normalizeMarket({ id: marketId });
+      }
+    });
+
+    const markets = await Promise.all(marketPromises);
+    const marketMap = new Map<string, Market>();
+    markets.forEach(market => {
+      if (market.id) {
+        marketMap.set(market.id, market);
+      }
+    });
+
+    // Update positions with enriched market data
+    return positions.map(position => {
+      if (position.market.id && marketMap.has(position.market.id)) {
+        return {
+          ...position,
+          market: marketMap.get(position.market.id)!,
+        };
+      }
+      return position;
+    });
+  }
+
+  /**
    * Normalize position data from API response
    */
   private normalizePositions(data: any[]): Position[] {
-    return data.map((item: any) => ({
-      id: item.id || item.positionId || '',
-      market: this.normalizeMarket(item.market || item.marketData),
-      outcome: item.outcome || item.outcomeToken || '',
-      quantity: item.quantity || item.size || '0',
-      price: item.price || item.lastPrice || '0',
-      value: item.value || this.calculatePositionValue(item),
-      timestamp: item.timestamp || item.createdAt || new Date().toISOString(),
-    }));
+    return data
+      .filter((item: any) => item != null)
+      .map((item: any) => {
+        // Extract market data directly from the item (API already includes it!)
+        const marketData = {
+          id: item.conditionId || item.market_id || item.marketId || '',
+          question: item.title || item.question || '',
+          slug: item.slug || '',
+          icon: item.icon || '',
+          eventSlug: item.eventSlug || '',
+          endDate: item.endDate || '',
+        };
+        
+        // Calculate current value from the position data
+        const currentValue = item.currentValue !== undefined 
+          ? String(item.currentValue) 
+          : this.calculatePositionValue(item);
+        
+        return {
+          id: item.asset || item.id || item.positionId || '',
+          market: this.normalizeMarket(marketData),
+          outcome: item.outcome || item.outcomeToken || '',
+          quantity: String(item.size || item.quantity || '0'),
+          price: String(item.curPrice || item.avgPrice || item.price || '0'),
+          value: currentValue,
+          timestamp: item.timestamp 
+            ? (typeof item.timestamp === 'number' 
+                ? new Date(item.timestamp * 1000).toISOString() 
+                : item.timestamp)
+            : new Date().toISOString(),
+        };
+      });
   }
 
   /**
    * Normalize trade data from API response
    */
   private normalizeTrades(data: any[]): Trade[] {
-    return data.map((item: any) => ({
-      id: item.id || item.tradeId || '',
-      market: this.normalizeMarket(item.market || item.marketData),
-      outcome: item.outcome || item.outcomeToken || '',
-      side: item.side || (item.isBuy ? 'buy' : 'sell'),
-      quantity: item.quantity || item.size || '0',
-      price: item.price || item.executionPrice || '0',
-      timestamp: item.timestamp || item.createdAt || new Date().toISOString(),
-      transactionHash: item.transactionHash || item.txHash,
-      user: item.user || item.userAddress || '',
-    }));
+    return data
+      .filter((item: any) => item != null) // Filter out null/undefined items
+      .map((item: any) => {
+        // Extract market data directly from the item (API already includes it!)
+        const marketData = {
+          id: item.conditionId || item.market_id || item.marketId || '',
+          question: item.title || item.question || '',
+          slug: item.slug || '',
+          icon: item.icon || '',
+          eventSlug: item.eventSlug || '',
+        };
+        
+        return {
+          id: item.transactionHash || item.id || item.tradeId || `trade-${Date.now()}-${Math.random()}`,
+          market: this.normalizeMarket(marketData),
+          outcome: item.outcome || item.outcomeToken || '',
+          side: (item.side || '').toLowerCase() === 'buy' ? 'buy' : 'sell',
+          quantity: String(item.size || item.quantity || item.amount || '0'),
+          price: String(item.price || item.executionPrice || item.fillPrice || '0'),
+          timestamp: item.timestamp 
+            ? (typeof item.timestamp === 'number' 
+                ? new Date(item.timestamp * 1000).toISOString() 
+                : item.timestamp)
+            : new Date().toISOString(),
+          transactionHash: item.transactionHash || item.txHash || item.tx,
+          user: item.proxyWallet || item.user || item.userAddress || item.account || '',
+        };
+      });
   }
 
   /**
    * Normalize market data from API response
    */
   private normalizeMarket(data: any): Market {
+    // Handle null/undefined data
+    if (!data || typeof data !== 'object') {
+      return {
+        id: '',
+        question: 'Unknown Market',
+        slug: '',
+        description: undefined,
+        endDate: undefined,
+        image: undefined,
+        icon: undefined,
+        resolutionSource: undefined,
+        tags: [],
+        liquidity: undefined,
+        volume: undefined,
+        active: true,
+      };
+    }
+
     return {
-      id: data.id || data.marketId || '',
-      question: data.question || data.title || '',
-      slug: data.slug || '',
-      description: data.description,
-      endDate: data.endDate || data.endDateISO,
-      image: data.image || data.imageUrl,
+      id: data.id || data.marketId || data.market_id || data.conditionId || '',
+      question: data.question || data.title || data.name || 'Unknown Market',
+      slug: data.slug || data.slug_id || '',
+      description: data.description || data.desc,
+      endDate: data.endDate || data.endDateISO || data.end_date,
+      image: data.image || data.imageUrl || data.image_url,
       icon: data.icon,
-      resolutionSource: data.resolutionSource,
-      tags: data.tags || [],
-      liquidity: data.liquidity ? parseFloat(data.liquidity) : undefined,
-      volume: data.volume ? parseFloat(data.volume) : undefined,
-      active: data.active !== undefined ? data.active : true,
+      resolutionSource: data.resolutionSource || data.resolution_source,
+      tags: Array.isArray(data.tags) ? data.tags : [],
+      liquidity: data.liquidity ? parseFloat(String(data.liquidity)) : undefined,
+      volume: data.volume ? parseFloat(String(data.volume)) : undefined,
+      active: data.active !== undefined ? Boolean(data.active) : true,
     };
   }
 

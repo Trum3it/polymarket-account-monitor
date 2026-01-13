@@ -3,6 +3,13 @@
  * Main entry point for the application
  */
 
+import dotenv from 'dotenv';
+import { AccountMonitor } from './monitor/account-monitor';
+import { PolymarketClient } from './api/polymarket-client';
+
+// Load environment variables from .env file
+dotenv.config();
+
 export { AccountMonitor } from './monitor/account-monitor';
 export { PolymarketClient } from './api/polymarket-client';
 export * from './types';
@@ -24,18 +31,18 @@ if (require.main === module) {
 
   const monitor = new AccountMonitor(client, {
     targetAddress,
-    pollInterval: 30000, // Poll every 30 seconds
+    pollInterval: 2000, // Poll every 30 seconds
     enableWebSocket: false,
-    onUpdate: (status) => {
+    onUpdate: (status: any) => {
       console.log(monitor.getFormattedStatus(status));
     },
-    onError: (error) => {
+    onError: (error: any) => {
       console.error('Monitor error:', error.message);
     },
   });
 
   // Start monitoring
-  monitor.start().catch((error) => {
+  monitor.start().catch((error: any) => {
     console.error('Failed to start monitor:', error);
     process.exit(1);
   });

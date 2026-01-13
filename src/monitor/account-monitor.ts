@@ -82,10 +82,39 @@ export class AccountMonitor {
    */
   async getStatus(): Promise<TradingStatus> {
     try {
-      const [positions, trades] = await Promise.all([
+      // Use allSettled so one failure doesn't break the other
+      const [positionsResult, tradesResult] = await Promise.allSettled([
         this.client.getUserPositions(this.options.targetAddress),
         this.client.getUserTrades(this.options.targetAddress, 20),
       ]);
+
+      // Extract positions (handle both success and failure)
+      const positions = positionsResult.status === 'fulfilled' 
+        ? positionsResult.value 
+        : {
+            user: this.options.targetAddress,
+            positions: [],
+            totalValue: '0',
+            timestamp: new Date().toISOString(),
+          };
+
+      // Extract trades (handle both success and failure)
+      const trades = tradesResult.status === 'fulfilled'
+        ? tradesResult.value
+        : {
+            user: this.options.targetAddress,
+            trades: [],
+            totalTrades: 0,
+            timestamp: new Date().toISOString(),
+          };
+
+      // Log warnings for failures
+      if (positionsResult.status === 'rejected') {
+        console.warn('Failed to fetch positions:', positionsResult.reason?.message || 'Unknown error');
+      }
+      if (tradesResult.status === 'rejected') {
+        console.warn('Failed to fetch trades:', tradesResult.reason?.message || 'Unknown error');
+      }
 
       const status: TradingStatus = {
         user: this.options.targetAddress,
@@ -155,38 +184,67 @@ export class AccountMonitor {
   }
 
   /**
-   * Get formatted status string for display
+   * Get formatted status string for display (simplified, user-friendly)
    */
   getFormattedStatus(status: TradingStatus): string {
+    const totalValue = parseFloat(status.totalValue);
     const lines = [
-      `\n=== Polymarket Account Monitor ===`,
-      `User: ${status.user}`,
-      `Last Updated: ${new Date(status.lastUpdated).toLocaleString()}`,
-      `\n📊 Positions:`,
-      `  Total Open Positions: ${status.totalPositions}`,
-      `  Total Value: $${parseFloat(status.totalValue).toFixed(2)}`,
-      `\n📈 Recent Trades: ${status.recentTrades.length}`,
+      `\n╔══════════════════════════════════════════════════════════╗`,
+      `║     Polymarket Account Monitor - Trading Status            ║`,
+      `╚══════════════════════════════════════════════════════════╝`,
+      `\n👤 Account: ${status.user.substring(0, 10)}...${status.user.substring(status.user.length - 8)}`,
+      `🕐 Last Updated: ${new Date(status.lastUpdated).toLocaleString()}`,
+      `\n📊 Portfolio Summary:`,
+      `   • Open Positions: ${status.totalPositions}`,
+      `   • Total Value: $${totalValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
     ];
 
+    // Recent Trades (historical/completed trades)
     if (status.recentTrades.length > 0) {
+      lines.push(`\n📈 Recent Trading Activity (Completed Trades - Last ${Math.min(5, status.recentTrades.length)}):`);
       status.recentTrades.slice(0, 5).forEach((trade, index) => {
+        const side = trade.side.toUpperCase();
+        const sideIcon = trade.side === 'buy' ? '🟢' : '🔴';
+        const quantity = parseFloat(trade.quantity).toLocaleString('en-US', { maximumFractionDigits: 2 });
+        const price = parseFloat(trade.price).toFixed(4);
+        const marketTitle = trade.market.question || 'Unknown Market';
+        const shortTitle = marketTitle.length > 45 ? marketTitle.substring(0, 42) + '...' : marketTitle;
+        
         lines.push(
-          `  ${index + 1}. ${trade.side.toUpperCase()} ${trade.quantity} @ $${parseFloat(trade.price).toFixed(4)} - ${trade.market.question.substring(0, 50)}...`
+          `   ${index + 1}. ${sideIcon} ${side} ${quantity} shares @ $${price}`
         );
+        lines.push(`      ${shortTitle}`);
+        if (trade.transactionHash) {
+          lines.push(`      TX: ${trade.transactionHash.substring(0, 10)}...${trade.transactionHash.substring(trade.transactionHash.length - 8)}`);
+        }
       });
+    } else {
+      lines.push(`\n📈 Recent Trading Activity: No completed trades found`);
     }
 
+    // Top Positions (currently open/active positions)
     if (status.openPositions.length > 0) {
-      lines.push(`\n💼 Open Positions:`);
+      lines.push(`\n💼 Currently Open Positions (Active - showing ${Math.min(5, status.openPositions.length)} of ${status.openPositions.length}):`);
       status.openPositions.slice(0, 5).forEach((position, index) => {
+        const outcome = position.outcome;
+        const quantity = parseFloat(position.quantity).toLocaleString('en-US', { maximumFractionDigits: 2 });
+        const price = parseFloat(position.price).toFixed(4);
+        const value = parseFloat(position.value);
+        const valueStr = value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const marketTitle = position.market.question || 'Unknown Market';
+        const shortTitle = marketTitle.length > 50 ? marketTitle.substring(0, 47) + '...' : marketTitle;
+        
         lines.push(
-          `  ${index + 1}. ${position.outcome}: ${position.quantity} @ $${parseFloat(position.price).toFixed(4)} (Value: $${parseFloat(position.value).toFixed(2)})`
+          `   ${index + 1}. ${outcome}: ${quantity} shares @ $${price}`
         );
-        lines.push(`     Market: ${position.market.question.substring(0, 60)}...`);
+        lines.push(`      Current Value: $${valueStr}`);
+        lines.push(`      Market: ${shortTitle}`);
       });
+    } else {
+      lines.push(`\n💼 Currently Open Positions: No active positions`);
     }
 
-    lines.push(`\n================================\n`);
+    lines.push(`\n╚══════════════════════════════════════════════════════════╝\n`);
 
     return lines.join('\n');
   }
