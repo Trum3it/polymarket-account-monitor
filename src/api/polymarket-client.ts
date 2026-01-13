@@ -45,23 +45,85 @@ export class PolymarketClient {
       let positions: Position[] = [];
       
       try {
-        // Primary endpoint format
-        const response = await this.client.get(`/users/${userAddress}/positions`, {
-          params: {
-            active: true,
-          },
-        });
-        positions = response.data.positions || response.data?.data || response.data || [];
+        // Primary endpoint format - try to get all positions (check for pagination)
+        let allPositions: any[] = [];
+        let hasMore = true;
+        let page = 0;
+        const limit = 100; // API might limit to 100 per page
+        
+        while (hasMore && page < 10) { // Limit to 10 pages to avoid infinite loops
+          const response = await this.client.get(`/users/${userAddress}/positions`, {
+            params: {
+              active: true,
+              limit: limit,
+              offset: page * limit,
+              ...(page > 0 && { page: page }),
+            },
+          });
+          
+          const pagePositions = response.data.positions || response.data?.data || response.data || [];
+          
+          if (Array.isArray(pagePositions)) {
+            allPositions = allPositions.concat(pagePositions);
+            
+            // Check if we got fewer results than limit (last page)
+            if (pagePositions.length < limit) {
+              hasMore = false;
+            } else {
+              page++;
+              // Log pagination if fetching multiple pages
+              if (page === 1 && process.env.DEBUG) {
+                console.log(`[DEBUG] Fetching positions page ${page + 1}... (found ${allPositions.length} so far)`);
+              }
+            }
+          } else {
+            // If response is not an array, it might be the full result
+            allPositions = pagePositions;
+            hasMore = false;
+          }
+        }
+        
+        positions = allPositions;
+        
+        // Log if we hit the pagination limit
+        if (page >= 10 && hasMore && process.env.DEBUG) {
+          console.log(`[WARNING] Hit pagination limit (10 pages). There may be more than ${allPositions.length} positions.`);
+        }
       } catch (primaryError: any) {
         // Try alternative endpoint format (GraphQL or different structure)
         try {
-          const altResponse = await this.client.get(`/positions`, {
-            params: {
-              user: userAddress,
-              active: true,
-            },
-          });
-          positions = altResponse.data.positions || altResponse.data?.data || altResponse.data || [];
+          let allPositions: any[] = [];
+          let hasMore = true;
+          let page = 0;
+          const limit = 100;
+          
+          while (hasMore && page < 10) {
+            const altResponse = await this.client.get(`/positions`, {
+              params: {
+                user: userAddress,
+                active: true,
+                limit: limit,
+                offset: page * limit,
+                ...(page > 0 && { page: page }),
+              },
+            });
+            
+            const pagePositions = altResponse.data.positions || altResponse.data?.data || altResponse.data || [];
+            
+            if (Array.isArray(pagePositions)) {
+              allPositions = allPositions.concat(pagePositions);
+              if (pagePositions.length < limit) {
+                hasMore = false;
+              } else {
+                page++;
+              }
+            } else {
+              allPositions = pagePositions;
+              hasMore = false;
+            }
+          }
+          
+          positions = allPositions;
         } catch (altError: any) {
           // If both fail, check if it's a 404 (no positions) or actual error
           if (primaryError.response?.status === 404 || altError.response?.status === 404) {

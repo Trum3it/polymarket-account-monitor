@@ -184,6 +184,12 @@ export class AccountMonitor {
           
           if (removedPositions.length > 0) {
             console.log(`\n❌ POSITION CLOSED (${removedPositions.length} position(s) removed)`);
+            removedPositions.forEach(pos => {
+              const value = parseFloat(pos.value);
+              const valueStr = value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+              console.log(`   - ${pos.outcome}: ${pos.quantity} shares @ $${pos.price} (Value: $${valueStr})`);
+              console.log(`     Market: ${pos.market.question || 'Unknown Market'}`);
+            });
           }
           
           if (status.openPositions.length !== this.lastStatus.openPositions.length) {
