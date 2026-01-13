@@ -24,6 +24,7 @@ export interface Position {
   quantity: string;
   price: string;
   value: string;
+  initialValue?: string; // Original cost basis
   timestamp: string;
 }
 

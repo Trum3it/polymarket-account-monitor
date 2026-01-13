@@ -417,17 +417,45 @@ export class PolymarketClient {
         };
         
         // Calculate current value from the position data
-        const currentValue = item.currentValue !== undefined 
-          ? String(item.currentValue) 
-          : this.calculatePositionValue(item);
+        // Priority: currentValue > (size * curPrice) > initialValue > (size * avgPrice)
+        let currentValue: string;
+        const size = parseFloat(item.size || item.quantity || '0');
+        const curPrice = parseFloat(item.curPrice || item.currentPrice || '0');
+        const avgPrice = parseFloat(item.avgPrice || item.price || '0');
+        
+        if (item.currentValue !== undefined && item.currentValue !== null && item.currentValue !== 0) {
+          // Use API's currentValue if it's not 0
+          currentValue = String(item.currentValue);
+        } else if (curPrice > 0 && size > 0) {
+          // Calculate from size * current price
+          currentValue = String(size * curPrice);
+        } else if (item.initialValue !== undefined && item.initialValue !== null && item.initialValue > 0) {
+          // Fallback to initial value
+          currentValue = String(item.initialValue);
+        } else if (avgPrice > 0 && size > 0) {
+          // Calculate from size * average price (cost basis)
+          currentValue = String(size * avgPrice);
+        } else {
+          // Last resort: use calculatePositionValue
+          currentValue = this.calculatePositionValue(item);
+        }
+        
+        // Use current price if available and > 0, otherwise use average price
+        const displayPrice = curPrice > 0 ? curPrice : (avgPrice > 0 ? avgPrice : '0');
+        
+        // Store initial value for display when current value is 0
+        const initialValue = item.initialValue !== undefined && item.initialValue !== null
+          ? String(item.initialValue)
+          : (avgPrice > 0 && size > 0 ? String(size * avgPrice) : undefined);
         
         return {
           id: item.asset || item.id || item.positionId || '',
           market: this.normalizeMarket(marketData),
           outcome: item.outcome || item.outcomeToken || '',
           quantity: String(item.size || item.quantity || '0'),
-          price: String(item.curPrice || item.avgPrice || item.price || '0'),
+          price: String(displayPrice),
           value: currentValue,
+          initialValue: initialValue,
           timestamp: item.timestamp 
             ? (typeof item.timestamp === 'number' 
                 ? new Date(item.timestamp * 1000).toISOString() 
